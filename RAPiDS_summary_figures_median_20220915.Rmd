@@ -1,0 +1,266 @@
+---
+title: "Processing RAPiDS II: Summary Figures"
+author: "Sally Claridge"
+date: "28 July 2022"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+set.seed(1234)
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 6, digits = 4)
+```
+
+# Code to Always Run
+
+--------------------------------------------------------------------------------
+
+Run all code chunks in the `Code to Always Run` section when you start an R session. You only need to run this code once per session if you are only using one set of Global Variables. Run this section again if you change any of the Global Variables.
+
+## Global variables
+
+--------------------------------------------------------------------------------
+
+**Edit this section**
+
+Enter appropriate variables here:
+```{r global_variables}
+# Path to input data file
+data_path <- "/Users/cavalij03/Documents/Hopkins Labortatoy 19.3.12-present/RAPIDs/Kidney CSVs/22.05.31 old drugs only Kidney RAPIDS NO ALP VOL 74 or 291 Median.csv"
+
+# Path to CSV with New_Name annotation (must have two columns, "FGP_Number" and "New_Name")
+new_name_path <- "/Users/cavalij03/Documents/Hopkins Labortatoy 19.3.12-present/RAPIDs/Kidney CSVs/22.09.14 Kidney Annotation of FGP.csv"
+# Set flag to merge new_name data (TRUE or FALSE)
+convert_to_new_names <- TRUE
+
+# Path to directory where you want the plots to be saved (if this directory doesn't exist, this script will make a new directory)
+outpath <- "/Users/cavalij03/Documents/Hopkins Labortatoy 19.3.12-present/RAPIDs/Kidney Curves/22.09.15 BP line Thick/"
+```
+
+## Packages and functions
+
+--------------------------------------------------------------------------------
+
+**Do not edit this section**
+
+Load appropriate packages:
+```{r, message=FALSE, warning=FALSE}
+pkgs <- c("tidyverse", "reshape2", "magrittr", "ggplot2", "drc", "PharmacoGx", "plotly", "htmlwidgets", "ComplexHeatmap", "ggpubr")
+
+check <- sapply(pkgs, require, warn.conflicts = TRUE, character.only = TRUE)
+if(any(!check)){
+  pkgs.missing <- pkgs[!check]
+  install.packages(pkgs.missing)
+  check <- sapply(pkgs.missing, require, warn.conflicts = TRUE, character.only = TRUE)
+}
+```
+
+## Load data
+
+--------------------------------------------------------------------------------
+
+**Do not edit this section**
+
+Load in the RAPiDS data indicated by the `data_path` variable given in the *Global variables* section:
+```{r}
+dataframe <- read.delim(file = data_path, header = TRUE, sep = ",", check.names = FALSE, stringsAsFactors = FALSE)
+
+# Comput norm column if it does not exist by dividing raw CellTiter-Glo values by the appropriate control values
+if(!("norm" %in% colnames(dataframe))) { dataframe$norm <- dataframe$Raw_CTG / dataframe$Control }
+
+# Merge rapids and new_name if convert_to_new_names flag is TRUE
+# This merges new names in and replaces the FGP_Number columns values with the new names
+if(convert_to_new_names) {
+  new_name <- read.delim(file = new_name_path, header = TRUE, sep = ",", check.names = FALSE, stringsAsFactors = FALSE)
+  dataframe <- merge(dataframe, new_name, by = "FGP_Number", all.x = TRUE)
+  dataframe$FGP_Number <- dataframe$New_Name
+}
+```
+
+Create output directory indicated by the `outpath` variable given in the *Global variables* section:
+```{r}
+# Check outpath ends with "/"
+if(endsWith(outpath, "/")) { outpath <- outpath }
+if(!endsWith(outpath, "/")) { outpath <- paste0(outpath, "/") }
+# Check if directory exists, else make directory
+if(!dir.exists(file.path(outpath))) { dir.create(file.path(outpath), recursive = TRUE) }
+```
+
+# Code to Make Plots
+
+--------------------------------------------------------------------------------
+
+Run code chunks in each of the subsections below depending on which plot you want to make.
+
+## Curves colored by drug per FGP number
+
+--------------------------------------------------------------------------------
+
+**Edit this chunk**
+```{r}
+fgp_number <- "ccRCC_10"
+
+drugnames <- c("Axitinib")
+# drugnames <- c("Alpelisib")
+# Can be 1, 2, or 3 drugnames, written exactly as they are in the CSV that was loaded
+# e.g. c("X", "Y", "Z") OR c("X", "Z") OR c("Z")
+
+colornames <- c("darkcyan", "darksalmon", "goldenrod2")
+# Can be 1, 2, or 3 colors, corresponding to the drug order above
+# See color names available here: http://www.stat.columbia.edu/~tzheng/files/Rcolor.pdf
+
+blood_plasma_concs <- data.frame(Drug = drugnames, bp_conc = c(0.072))
+# Set blood plasma levels in the item called bp_conc, corresponding to the drug order above
+# Use NA for the drug blood plasma levels that you do not want on the plot
+# e.g. bp_conc = c(3, 5, 1) OR bp_conc = c(3, 5, NA) OR bp_conc = c(NA, 5, NA)
+
+maximum_y_value <- 2
+# If set to NA, no y-axis limit is set
+```
+
+**Do not edit this chunk**
+```{r}
+# Check data
+if(!(fgp_number %in% dataframe$FGP_Number)) { stop("Error: The specified FGP number is not in the input CSV. Make sure there is not a typo.") }
+if(length(intersect(drugnames, unique(dataframe$Drug))) != length(drugnames)) { stop("Error: At least one of specified drugs is not in the input CSV. Make sure there is not a typo.") }
+
+# Filter dataframe
+plot_df <- filter(dataframe, Drug %in% drugnames)
+plot_df <- filter(plot_df, FGP_Number == fgp_number)
+
+# Set maximum y-axis value based on flag in previous code chunk
+y_max <- ifelse(is.na(maximum_y_value), signif(max(plot_df$norm), digits = 2), maximum_y_value)
+
+# Make plot object
+plot_drc <- ggplot(data = plot_df, mapping = aes(color = Drug)) +
+  geom_point(aes(x = Concentration, y = norm), alpha = 0.5) +
+  stat_smooth(aes(x = Concentration, y = median),
+              method = "drm",
+              se = FALSE,
+              method.args = list(fct = L.4())) +
+  coord_cartesian(ylim = c(0, y_max)) +
+  geom_vline(data = blood_plasma_concs, aes(color = Drug, xintercept = bp_conc), lty = 2) +
+  scale_color_manual(breaks = drugnames, values = colornames) +
+  scale_x_log10() +
+  theme_bw() +
+  labs(x = "Concentration (uM)",
+       y = "Relative intensity (CellTiter-Glo)",
+       title = fgp_number)
+
+# Create unique name for PNG
+png_name <- paste0(format(Sys.Date(), "%Y%m%d"), "_", fgp_number, "_DRC.png")
+if(!file.exists(paste0(outpath, png_name))) { png_name <- png_name }
+if(file.exists(paste0(outpath, png_name))) {
+  print("Filename exists. Re-naming new file with time-stamp (HHMM) to not overwrite existing file.")
+  png_name <- paste0(format(Sys.time(), "%H%M"), "_", png_name)
+}
+
+# Save file
+ggsave(filename = png_name,
+       path = outpath,
+       plot = plot_drc,
+       dpi = 300, width = 4, height = 3, units = "in", device = "png")
+
+# Success message
+writeLines(paste0("ALL DONE! :D","\n", "Output file: ", outpath, png_name))
+```
+
+## Curves colored by FGP per drug
+
+--------------------------------------------------------------------------------
+
+**Edit this chunk**
+```{r}
+drugname <- "Capmatinib"
+# Set blood plasma concentration as a character value
+
+blood_plasma_conc <- c(8.89)
+# Set blood plasma concentration as a numeric value
+
+# fgp_numbers <- c("FGP61_PT", "FGP68", "FGP73", "FGP74", "FGP78", "FGP80", "FGP86", "FGP102", "FGP172_CT", "FGP172_PT", "FGP196", "FGP241", "FGP253", "FGP256", "FGP262_PT", "FGP262_CT", "FGP286", "FGP286_metastasis")
+# Select specific FGPs
+
+# Remove `#` from line below if you want all FGP numbers in the input CSV on the plot
+fgp_numbers <- unique(dataframe$FGP_Number)
+
+colornames <- c("firebrick", "deeppink", "darksalmon", "darkorange", "gold","darkolivegreen1", "forestgreen","aquamarine", "dodgerblue1", "darkslateblue","darkorchid1", "darkmagenta")
+# colornames <- c("firebrick", "violetred", "deeppink", "darksalmon", "darkorange", "darkgoldenrod", "gold", "darkgreen", "darkolivegreen1", "darkseagreen" ,"chartruese2", "darkcyan", "aquamarine","deepskyblue", "dodgerblue1", "darkslateblue","darkmagenta", "darkorchid1")
+# Choose the same number of colors corresponding to the drug order above
+# See color names available here: http://www.stat.columbia.edu/~tzheng/files/Rcolor.pdf
+
+maximum_y_value <- 3
+# If set to NA, no y-axis limit is set
+```
+
+**Do not edit this chunk**
+```{r}
+# Check data
+if(!(drugname %in% dataframe$Drug)) { stop("Error: The specified drugname is not in the input CSV. Make sure there is not a typo.") }
+if(length(intersect(fgp_numbers, unique(dataframe$FGP_Number))) != length(fgp_numbers)) { stop("Error: At least one of specified FGP numbers is not in the input CSV. Make sure there is not a typo.") }
+
+# Filter dataframe
+plot_df <- filter(dataframe, Drug == drugname)
+plot_df <- filter(plot_df, FGP_Number %in% fgp_numbers)
+
+# Set maximum y-axis value based on flag in previous code chunk
+y_max <- ifelse(is.na(maximum_y_value), signif(max(plot_df$norm), digits = 2), maximum_y_value)
+
+# Make plot object
+if (length(blood_plasma_conc)==2){
+plot_drc <- ggplot(data = plot_df, mapping = aes(color = FGP_Number)) +
+  geom_point(aes(x = Concentration, y = norm), alpha = 0.5) +
+  stat_smooth(aes(x = Concentration, y = median),
+              method = "drm",
+              se = FALSE,
+              method.args = list(fct = L.4())) +
+  coord_cartesian(ylim = c(0, y_max)) +
+  geom_vline(color = "black", xintercept = blood_plasma_conc[1], lty = 2) +
+  geom_vline(color = "black", xintercept = blood_plasma_conc[2], lty = 2) +
+  scale_color_manual(breaks = fgp_numbers, values = colornames) +
+  scale_x_log10() +
+  theme_bw() +
+  labs(x = "Concentration (uM)",
+       y = "Relative intensity (CellTiter-Glo)",
+       title = drugname, color = "Case")
+} else {
+plot_drc <- ggplot(data = plot_df, mapping = aes(color = FGP_Number)) +
+  geom_point(aes(x = Concentration, y = norm), alpha = 0.5) +
+  stat_smooth(aes(x = Concentration, y = median),
+              method = "drm",
+              se = FALSE,
+              method.args = list(fct = L.4())) +
+  coord_cartesian(ylim = c(0, y_max)) +
+  geom_vline(color = "black", xintercept = blood_plasma_conc[1], lty = 2) +
+  scale_color_manual(breaks = fgp_numbers, values = colornames) +
+  scale_x_log10() +
+  theme_bw() +
+  labs(x = "Concentration (uM)",
+       y = "Relative intensity (CellTiter-Glo)",
+       title = drugname, color = "Case")
+}
+
+# Create unique PNG name
+png_name <- paste0(format(Sys.Date(), "%Y%m%d"), "_", drugname, "_DRC.png")
+if(!file.exists(paste0(outpath, png_name))) { png_name <- png_name }
+if(file.exists(paste0(outpath, png_name))) {
+  print("Filename exists. Re-naming new file with time-stamp (HHMM) to not overwrite existing file.")
+  png_name <- paste0(format(Sys.time(), "%H%M"), "_", png_name)
+}
+
+# Save file
+ggsave(filename = png_name,
+       path = outpath,
+       plot = plot_drc,
+       dpi = 300, width = 4, height = 3, units = "in", device = "png")
+
+# Success message
+writeLines(paste0("ALL DONE! :D","\n", "Output file: ", outpath, png_name))
+```
+
+# Session information
+
+--------------------------------------------------------------------------------
+
+```{r}
+sessionInfo()
+```

@@ -1,0 +1,480 @@
+---
+title: "Processing RAPiDS: Growth Metrics and Heatmaps"
+author: "Sally Claridge"
+date: "14 September 2022"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+set.seed(1234)
+knitr::opts_chunk$set(echo = TRUE)
+options(scipen = 6, digits = 4)
+```
+
+# Global variables
+
+--------------------------------------------------------------------------------
+
+Enter appropriate variables here:
+```{r global_variables}
+# Path to input data file
+data_path <- "/Users/cavalij03/Documents/Hopkins Labortatoy 19.3.12-present/RAPIDs/Kidney CSVs/22.05.031 Kidney RAPIDS new OVERLAP No PEMBRO or 290 Median.csv"
+
+# Path to CSV with New_Name annotation (must have two columns, "FGP_Number" and "New_Name")
+new_name_path <- "/Users/cavalij03/Documents/Hopkins Labortatoy 19.3.12-present/RAPIDs/Kidney CSVs/22.09.14 Kidney Annotation of FGP.csv"
+# Set flag to merge new_name data (TRUE or FALSE)
+convert_to_new_names <- TRUE
+
+# Extra text to put into the output folder name that will contain all the curves
+file_extra <- "22.09.15 Histology annotated graphs New Panel Thick lines"
+
+maximum_y_value <- 3
+# If maximum_y_value is set to NA, no y-axis limit is set
+
+# If "set", automatically sets heatmap scale to be [-3, 2]
+# If "flexible", sets scale to make the minimum and maximum values in the dataset
+color_setting_options <- c("flexible", "set")
+color_setting <- color_setting_options[2]
+                                                                           
+# Path to directory where you want the plots to be saved (if this directory doesn't exist, this script will make a new directory)
+# Be sure to include the forward slash at the end of the string
+# Note that all output files from this run of the script will be put into a subdirectory in this outpath directory called YYYYMMDD_<file_extra>
+outpath <- "/Users/cavalij03/Documents/Hopkins Labortatoy 19.3.12-present/RAPIDs/Kidney Curves/"
+```
+
+**DO NOT EDIT BELOW THIS LINE**
+
+# Packages and functions
+
+--------------------------------------------------------------------------------
+
+Load appropriate packages:
+```{r, message=FALSE, warning=FALSE}
+pkgs <- c("tidyverse", "reshape2", "magrittr", "ggplot2", "drc", "PharmacoGx", "plotly", "htmlwidgets", "ComplexHeatmap")
+
+check <- sapply(pkgs, require, warn.conflicts = TRUE, character.only = TRUE)
+if(any(!check)){
+  pkgs.missing <- pkgs[!check]
+  install.packages(pkgs.missing)
+  check <- sapply(pkgs.missing, require, warn.conflicts = TRUE, character.only = TRUE)
+}
+```
+
+Function that takes in the whole dataframe, filters it by the given drug, and then makes dose response curves for all FGPs that were screened with that drug:
+```{r}
+OverlayDRCsByDrug <- function(drugname, dataframe) {
+  plot_df <- filter(dataframe, Drug == drugname)
+  
+  y_max <- ifelse(is.na(maximum_y_value), signif(max(plot_df$norm), digits = 2), maximum_y_value)
+
+  curves <- ggplot(data = plot_df, mapping = aes(color = FGP_Number)) +
+    geom_point(aes(x = as.numeric(Concentration), y = as.numeric(norm)), alpha = 0.5) +
+    stat_smooth(aes(x = as.numeric(Concentration), y = as.numeric(median)),
+                method = "drm",
+                se = FALSE,
+                method.args = list(fct = L.4(names = c("Slope",
+                                                       "Lower Limit",
+                                                       "Upper Limit",
+                                                       "ED50")))) +
+    coord_cartesian(ylim = c(0, y_max)) +
+    scale_x_log10() +
+    theme_bw() +
+    labs(x = "Concentration (uM)",
+         y = "Relative intensity (CellTiter-Glo)",
+         title = paste0("Drug: ", drugname),
+         color = "FGPs")
+
+  print(drugname)
+  return(curves)
+}
+```
+
+Function that takes in the whole dataframe, filters it by the given FGP, and then makes dose response curves for all drugs that were screened on that FGP:
+```{r}
+OverlayDRCsByFGP <- function(fgp_number, dataframe) {
+  plot_df <- filter(dataframe, FGP_Number == fgp_number)
+  
+  y_max <- ifelse(is.na(maximum_y_value), signif(max(plot_df$norm), digits = 2), maximum_y_value)
+
+  curves <- ggplot(data = plot_df, mapping = aes(color = Drug)) +
+    geom_point(aes(x = as.numeric(Concentration), y = as.numeric(norm)), alpha = 0.5) +
+    stat_smooth(aes(x = as.numeric(Concentration), y = as.numeric(median)),
+                method = "drm",
+                se = FALSE,
+                method.args = list(fct = L.4(names = c("Slope",
+                                                       "Lower Limit",
+                                                       "Upper Limit",
+                                                       "ED50")))) +
+    coord_cartesian(ylim = c(0, y_max)) +
+    scale_x_log10() +
+    theme_bw() +
+    labs(x = "Concentration (uM)",
+         y = "Relative intensity (CellTiter-Glo)",
+         title = paste0("Case: ", fgp_number),
+         color = "Drugs")
+
+  print(fgp_number)
+  return(curves)
+}
+```
+
+Given a dataframe of normalized CellTiter-Glo endpoint for a single drug/FGP combination, this function will produce a curve object that is fit to the median values:
+```{r}
+FitDRC <- function(dataset, fit_center) {
+  require(drc)
+
+  # Fit drc object
+  if(fit_center == "median") {
+    drc_fit <- drm(median ~ Concentration, fct = L.4(), data = dataset)
+  }
+  if(fit_center == "norm") {
+    drc_fit <- drm(norm ~ Concentration, fct = L.4(), data = dataset)
+  }
+  
+  return(drc_fit)
+}
+```
+
+Given a dataframe of normalized CellTiter-Glo endpoint for a single drug/FGP combination, this function will produce a single row of the output AUC dataframe that contains Drug, FGP_Number, and AUC.
+```{r}
+CalculateAUC <- function(dataset_drug) {
+  if(nrow(dataset_drug) == 0) { return(NULL) }
+  
+  require(PharmacoGx)
+  
+  aac <- PharmacoGx::computeAUC(concentration = dataset_drug$Concentration,
+                    viability = dataset_drug$median,
+                    viability_as_pct = FALSE,
+                    trunc = FALSE,
+                    area.type = "Fitted")
+  auc <- 1 - aac
+  row <- list("Drug" = unique(dataset_drug$Drug), "FGP_Number" = unique(dataset_drug$FGP_Number), "AUC" = auc)
+  
+  row_df <- data.frame(row)
+  
+  # print(paste0(unique(dataset_drug$Drug), ", ", unique(dataset_drug$FGP_Number), ", ", auc))
+
+  return(row_df)
+}
+```
+
+Given a dataframe of normalized CellTiter-Glo endpoint for a single drug/FGP combination, this function will produce a single row of the output IC dataframe that contains Drug, FGP_Number, IC30, and IC50
+```{r}
+ComputeGrowthMetrics <- function(drc_fit, dataset) {
+  minimum <- min(dataset$Concentration)
+  maximum <- max(dataset$Concentration)
+  
+  # Calculate ED30 and ED50 from dose response curve object
+  ic <- data.frame(ED(drc_fit, c(70, 50),
+                      interval = "delta",
+                      type = "relative",
+                      display = FALSE))
+  ic30 <- ic$Estimate[1]
+  # if(ic30 <= maximum & ic30 >= minimum) { ic30 <- ic30 }
+  # if(ic30 < minimum) { ic30 <- "-" }
+  # if(ic30 > maximum) { ic30 <- "+" }
+  
+  ic50 <- ic$Estimate[2]
+  # if(ic50 <= maximum & ic50 >= minimum) { ic50 <- ic50 }
+  # if(ic50 < minimum) { ic50 <- "-" }
+  # if(ic50 > maximum) { ic50 <- "+" }
+
+  growth_metrics <- c("Drug" = unique(dataset$Drug), "FGP_Number" = unique(dataset$FGP_Number), "IC30" = ic30, "IC50" = ic50)
+
+  return(growth_metrics)
+}
+```
+
+Make heatmap object of the AUC dataframes:
+```{r}
+MakeHeatmapAUC <- function(df, z_score, color_setting) {
+  require(ComplexHeatmap)
+  require(circlize)
+  # Assign "Drug" names to rownames
+  rownames(df) <- df$Drug
+  # Delete Drug column
+  df$Drug <- NULL
+  # Convert dataframe to matrix
+  df <- as.matrix(df)
+  
+  # Set legend options
+  if(color_setting == "raw_AUC") {
+    col_fun <- colorRamp2(breaks = c(0, 0.5, 1), c("mediumblue", "white", "red"))
+    ht_legend_parameters <- list(at = seq(0, 1, by = 0.2))
+  }
+  if(color_setting == "set") {
+    col_fun <- colorRamp2(c(-3, 0, 2), c("mediumblue", "white", "red"))
+    ht_legend_parameters <- list(at = seq(-3, 2, by = 1))
+  }
+  if(color_setting == "flexible") {
+    mindf <- min(floor(df))
+    maxdf <- max(ceiling(df))
+    col_fun <- colorRamp2(c(mindf, 0, maxdf), c("mediumblue", "white", "red"))
+    ht_legend_parameters <- list(at = seq(mindf, maxdf, by = 1))
+  }
+  
+  # Make heatmap object
+  # Resource for ComplexHeatmap package options: https://jokergoo.github.io/ComplexHeatmap-reference/book/
+  if(any(is.na(df))) {
+    ht <- Heatmap(matrix = df, # The data
+                  name = ifelse(isTRUE(z_score), "AUC z-score", "AUC"), # The title that will appear over the legend
+                  heatmap_legend_param = ht_legend_parameters,
+                  col = col_fun,
+                  rect_gp = gpar(col = "white", lwd = 1),
+                  border_gp = gpar(col = "black", lty = 2),
+                  na_col = "black",
+                  layer_fun = function(j, i, x, y, width, height, fill) {
+                    grid.rect(gp = gpar(lwd = 1, fill = "transparent"))
+                  },
+                  row_title = "Drugs",
+                  column_title = "Cases",
+                  cluster_rows = FALSE, cluster_columns = TRUE)
+  } else {
+    ht <- Heatmap(matrix = df, # The data
+                  name = ifelse(isTRUE(z_score), "AUC z-score", "AUC"), # The title that will appear over the legend
+                  heatmap_legend_param = ht_legend_parameters,
+                  col = col_fun,
+                  rect_gp = gpar(col = "white", lwd = 1),
+                  border_gp = gpar(col = "black", lty = 2),
+                  na_col = "black",
+                  layer_fun = function(j, i, x, y, width, height, fill) {
+                    grid.rect(gp = gpar(lwd = 1, fill = "transparent"))
+                  },
+                  row_title = "Drugs",
+                  column_title = "Cases",
+                  cluster_rows = TRUE, cluster_columns = TRUE)
+  }
+  
+  return(ht)
+}
+```
+
+# Load data
+
+--------------------------------------------------------------------------------
+
+Load in the RAPiDS data indicated by the `data_path` variable given in the *Global variables* section:
+```{r}
+rapids <- read.delim(file = data_path, header = TRUE, sep = ",", check.names = FALSE, stringsAsFactors = FALSE)
+
+# Comput norm column by dividing raw CellTiter-Glo values by the appropriate control values
+rapids$norm <- rapids$Raw_CTG / rapids$Control
+
+# Remove any lines with empty vectors in the Drug column
+rapids <- rapids[!(rapids$Drug == "" | is.na(rapids$Drug)),]
+
+# Merge rapids and new_name if convert_to_new_names flag is TRUE
+# This merges new names in and replaces the FGP_Number columns values with the new names
+if(convert_to_new_names) {
+  new_name <- read.delim(file = new_name_path, header = TRUE, sep = ",", check.names = FALSE, stringsAsFactors = FALSE)
+  rapids <- merge(rapids, new_name, by = "FGP_Number", all.x = TRUE)
+  rapids$FGP_Number <- rapids$New_Name
+}
+```
+
+# Make curves
+
+--------------------------------------------------------------------------------
+
+Make curves by drug:
+```{r, warning=FALSE, message=FALSE}
+# Get list of all unique drug names in the dataset
+drugnames <- unique(rapids$Drug)
+
+# For each drug name in the dataset, apply the OverlayDRCs function to make one plot per drug that has all dose response durves for all FGPs screened with that drug
+all_curves <- lapply(drugnames, OverlayDRCsByDrug, dataframe = rapids)
+
+# For each set of curves, make an interactive plot using the `ggplotly` function
+int_all_curves <- lapply(all_curves, ggplotly)
+```
+
+Make curves by FGP:
+```{r, warning=FALSE, message=FALSE}
+# Get list of all unique FGPs in the dataset
+fgp_numbers <- unique(rapids$FGP_Number)
+
+# For each drug name in the dataset, apply the OverlayDRCs function to make one plot per drug that has all dose response durves for all FGPs screened with that drug
+all_fgp_curves <- lapply(fgp_numbers, OverlayDRCsByFGP, dataframe = rapids)
+
+# For each set of curves, make an interactive plot using the `ggplotly` function
+int_all_fgp_curves <- lapply(all_fgp_curves, ggplotly)
+```
+# IC30s and IC50s
+
+--------------------------------------------------------------------------------
+
+```{r}
+drug_fgp_df_list <- split(rapids, list(rapids$Drug, rapids$FGP_Number))
+
+# Median
+drc_fits_med <- lapply(drug_fgp_df_list, FitDRC, fit_center = "median")
+metrics_list_med <- mapply(FUN = ComputeGrowthMetrics, drc_fit = drc_fits_med, dataset = drug_fgp_df_list, SIMPLIFY = FALSE)
+metrics_med <- as.data.frame(do.call(rbind, metrics_list_med))
+metrics_med <- transform(metrics_med, IC30 = as.numeric(IC30), IC50 = as.numeric(IC50))
+
+# Norm
+drc_fits_norm <- lapply(drug_fgp_df_list, FitDRC, fit_center = "norm")
+metrics_list_norm <- mapply(FUN = ComputeGrowthMetrics, drc_fit = drc_fits_norm, dataset = drug_fgp_df_list, SIMPLIFY = FALSE)
+metrics_norm <- as.data.frame(do.call(rbind, metrics_list_norm))
+metrics_norm <- transform(metrics_norm, IC30 = as.numeric(IC30), IC50 = as.numeric(IC50))
+```
+
+# AUCs
+
+--------------------------------------------------------------------------------
+
+Compute AUCs and AUC z-scores:
+```{r, message=FALSE, warning=FALSE}
+# Split the RAPiDS dataframe into a list of smaller dataframes, one for each drug/FGP combination
+drug_fgp_df_list <- split(rapids, list(rapids$Drug, rapids$FGP_Number))
+
+AUC_long <- do.call("rbind", # Bind all the AUC outputs from the line below this one
+                    lapply(drug_fgp_df_list, FUN = CalculateAUC)) # Calculate the AUC for each drug/FGP combination
+
+# Convert the long format AUC dataframe to wide with FGPs in the columns and drugs in the rows
+AUC_wide <- spread(AUC_long, key = FGP_Number, value = AUC)
+
+# Calculate AUC Z-scores for each drug across all FGPs
+AUC_z_by_drug <- as.data.frame(t(apply(AUC_wide[, -c(1)], MARGIN = 1, scale))) # (x - mean(x)) / sd(x), by row
+AUC_z_by_drug <- cbind(AUC_wide$Drug, AUC_z_by_drug)
+colnames(AUC_z_by_drug) <- colnames(AUC_wide)
+
+# Calculate AUC Z-scores for each FGP across all drugs
+AUC_z_by_FGP <- as.data.frame(t(apply(AUC_wide[, -c(1)], MARGIN = 2, scale))) # (x - mean(x)) / sd(x), by column
+AUC_z_by_FGP <- data.frame(t(AUC_z_by_FGP))
+AUC_z_by_FGP <- cbind("Drug" = AUC_wide$Drug, AUC_z_by_FGP)
+```
+
+Make heatmaps of the three AUC dataframes:
+```{r}
+ht_AUC_wide <- MakeHeatmapAUC(df = AUC_wide, z_score = FALSE, color_setting = "raw_AUC")
+ht_AUC_z_by_drug <- MakeHeatmapAUC(df = AUC_z_by_drug, z_score = TRUE, color_setting = color_setting)
+ht_AUC_z_by_FGP <- MakeHeatmapAUC(df = AUC_z_by_FGP, z_score = TRUE, color_setting = color_setting)
+```
+
+# Save files to output directory
+
+--------------------------------------------------------------------------------
+
+## Create output directory within the outpath directory
+
+```{r}
+# If "outpath" directory doesn't already exist, create it
+if(!dir.exists(file.path(outpath))) { dir.create(file.path(outpath), recursive = TRUE) }
+
+# Make subdirectory in the output directory for this specific run of the markdown
+outpath2 <- paste0(outpath, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "/")
+if(!dir.exists(file.path(outpath2))) { dir.create(file.path(outpath2), recursive = TRUE) }
+```
+
+## Save the IC30/50 data to the output directory
+
+```{r}
+write.csv(x = metrics_med, file = paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_IC3050_median_fit.csv"), row.names = FALSE)
+write.csv(x = metrics_norm, file = paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_IC3050_norm_fit.csv"), row.names = FALSE)
+```
+
+## Save the AUC data to the output directory
+
+```{r}
+write.csv(x = AUC_wide, file = paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_AUC.csv"), row.names = FALSE)
+write.csv(x = AUC_z_by_drug, file = paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_AUC_z_by_drug.csv"), row.names = FALSE)
+write.csv(x = AUC_z_by_FGP, file = paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_AUC_z_by_FGP.csv"), row.names = FALSE)
+
+h_n <- nrow(AUC_wide) * 0.75
+w_n <- ncol(AUC_wide)
+
+png(paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_AUC.png"), height = h_n, width = w_n, units = "in", res = 500)
+draw(ht_AUC_wide)
+dev.off()
+
+png(paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_AUC_z_by_drug.png"), height = h_n, width = w_n, units = "in", res = 500)
+draw(ht_AUC_z_by_drug)
+dev.off()
+
+png(paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_AUC_z_by_FGP.png"), height = h_n, width = w_n, units = "in", res = 500)
+draw(ht_AUC_z_by_FGP)
+dev.off()
+```
+
+## Save the static and interactive curve objects in their respective folders
+
+Curves by drug:
+```{r}
+# Make path to new directory within the "outpath2" directy into which this script will save the static plots
+curves_outpath <- paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_byDrug_curves")
+# If output directory for the curves doesn't already exist, create it
+if(!dir.exists(file.path(curves_outpath))) { dir.create(file.path(curves_outpath), recursive = TRUE) }
+# Name each plot file with the drug name
+all_paths <- paste0(drugnames, "_curves.png")
+
+# Make path to new directory within the "outpath2" directy into which this script will save the interactuve plots
+int_curves_outpath <- paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_interactive_byDrug_curves")
+# If output directory for the curves doesn't already exist, create it
+if(!dir.exists(file.path(int_curves_outpath))) { dir.create(file.path(int_curves_outpath), recursive = TRUE) }
+# Name each plot file with the drug name
+int_all_paths <- paste0(int_curves_outpath, "/", drugnames, "_curves.html")
+
+# Create all static plot objects and save to "curves_outpath" directory established above
+purrr::pwalk(list(all_paths, all_curves),
+             ggsave,
+             path = curves_outpath,
+             dpi = 300,
+             width = 4,
+             height = 3,
+             units = "in")
+
+# Create all static plot objects and save to "curves_outpath" directory established above
+for(i in 1:length(drugnames)) {
+  htmlwidgets::saveWidget(widget = int_all_curves[[i]], file = int_all_paths[i])
+}
+```
+
+Curves by FGP:
+```{r}
+# Make path to new directory within the "outpath2" directy into which this script will save the static plots
+curves_outpath <- paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_byFGP_curves")
+# If output directory for the curves doesn't already exist, create it
+if(!dir.exists(file.path(curves_outpath))) { dir.create(file.path(curves_outpath), recursive = TRUE) }
+# Name each plot file with the drug name
+all_fgp_paths <- paste0(fgp_numbers, "_curves.png")
+
+# Make path to new directory within the "outpath2" directy into which this script will save the interactuve plots
+int_curves_outpath <- paste0(outpath2, format(Sys.Date(), "%Y%m%d"), "_", file_extra, "_interactive_by_FGP_curves")
+# If output directory for the curves doesn't already exist, create it
+if(!dir.exists(file.path(int_curves_outpath))) { dir.create(file.path(int_curves_outpath), recursive = TRUE) }
+# Name each plot file with the drug name
+int_all_fgp_paths <- paste0(int_curves_outpath, "/", fgp_numbers, "_curves.html")
+
+# Create all static plot objects and save to "curves_outpath" directory established above
+purrr::pwalk(list(all_fgp_paths, all_fgp_curves),
+             ggsave,
+             path = curves_outpath,
+             dpi = 300,
+             width = 4,
+             height = 3,
+             units = "in")
+
+# Create all static plot objects and save to "curves_outpath" directory established above
+for(i in 1:length(drugnames)) {
+  htmlwidgets::saveWidget(widget = int_all_fgp_curves[[i]], file = int_all_fgp_paths[i])
+}
+```
+# Session information
+
+--------------------------------------------------------------------------------
+
+```{r}
+sessionInfo()
+```
+
+# End note
+
+--------------------------------------------------------------------------------
+
+```{r}
+writeLines(paste0("ALL DONE! :D","\n",
+                  "Your input file was: ", data_path, "\n",
+                  "Output files can be found in: ", outpath2))
+```
+
